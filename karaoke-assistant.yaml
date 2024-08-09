@@ -1,0 +1,741 @@
+substitutions:
+  # Phases of the Voice Assistant
+  # The voice assistant is ready to be triggered by a wake word
+  voice_assist_idle_phase_id: "1"
+  # The voice assistant is waiting for a voice command (after being triggered by the wake word)
+  voice_assist_waiting_for_command_phase_id: "2"
+  # The voice assistant is listening for a voice command
+  voice_assist_listening_for_command_phase_id: "3"
+  # The voice assistant is currently processing the command
+  voice_assist_thinking_phase_id: "4"
+  # The voice assistant is replying to the command
+  voice_assist_replying_phase_id: "5"
+  # The voice assistant is not ready
+  voice_assist_not_ready_phase_id: "10"
+  # The voice assistant encountered an error
+  voice_assist_error_phase_id: "11"
+
+globals:
+  # Global index for our LEDs. So that switching between different animation does not lead to unwanted effects.
+  - id: global_led_animation_index
+    type: int
+    restore_value: no
+    initial_value: "0"
+  # Global initialisation variable. Initialized to true and set to false once everything is connected. Only used to have a smooth "plugging" experience
+  - id: init_in_progress
+    type: bool
+    restore_value: no
+    initial_value: "true"
+  # Global variable tracking the phase of the voice assistant (defined above). Initialized to not_ready
+  - id: voice_assistant_phase
+    type: int
+    restore_value: no
+    initial_value: ${voice_assist_not_ready_phase_id}
+  - id: volume
+    type: int
+    restore_value: no
+    initial_value: "10"
+  # Global variable tracking if the volume buttons were recently touched.
+  - id: volume_touched
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+esphome:
+  name: karaoke-assistant-living-room
+  friendly_name: Karaoke Assistant Living Room
+  platformio_options:
+    board_build.flash_mode: dio
+    board_upload.maximum_size: 16777216
+  on_boot:
+    then:
+      - media_player.volume_set: 0.8
+      - delay: 30s
+      - if:
+          condition:
+            lambda: return id(init_in_progress);
+          then:
+            - lambda: id(init_in_progress) = false;
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      # need to set a s3 compatible board for the adf-sdk to compile
+      # board specific code is not used though
+      CONFIG_ESP32_S3_BOX_BOARD: "y"
+      CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM: "16"
+      CONFIG_ESP32_WIFI_DYNAMIC_RX_BUFFER_NUM: "512"
+      CONFIG_TCPIP_RECVMBOX_SIZE: "512"
+
+      CONFIG_TCP_SND_BUF_DEFAULT: "65535"
+      CONFIG_TCP_WND_DEFAULT: "512000"
+      CONFIG_TCP_RECVMBOX_SIZE: "512"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "I/kuQiHV7HXdAGOBGcAnDAaoNW3kChr5GcrNbr272h0="
+
+ota:
+  - platform: esphome
+    password: "8b9289bd9c89e6a319443bf7d7610063"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  output_power: 8.5dB
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Karaoke-Assistant-Living-Room"
+    password: "VyfKfWzQ8YnM"
+
+captive_portal:
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/gnumpi/esphome_audio
+      ref: dev-next
+    components: [adf_pipeline, i2s_audio]
+
+#############
+# I2S AUDIO #
+#############
+i2s_audio:
+  - id: i2s_out
+    i2s_lrclk_pin: GPIO7
+    i2s_bclk_pin: GPIO8
+  - id: i2s_in
+    i2s_lrclk_pin: GPIO5
+    i2s_bclk_pin: GPIO6
+
+adf_pipeline:
+  - platform: i2s_audio
+    type: audio_out
+    id: adf_i2s_out
+    i2s_audio_id: i2s_out
+    i2s_dout_pin: GPIO10
+    sample_rate: 44100
+    adf_alc: true
+    alc_max: 0.5
+    bits_per_sample: 32bit
+    fixed_settings: true
+
+  - platform: i2s_audio
+    type: audio_in
+    id: adf_i2s_in
+    i2s_audio_id: i2s_in
+    i2s_din_pin: GPIO11
+    pdm: false
+    channel: left
+    sample_rate: 16000
+    bits_per_sample: 32bit
+
+media_player:
+  - platform: adf_pipeline
+    id: adf_media_player
+    name: Living Room Media Player
+    keep_pipeline_alive: false
+    internal: false
+    pipeline:
+      - self
+      - resampler
+      - adf_i2s_out
+
+microphone:
+  - platform: adf_pipeline
+    id: adf_microphone
+    gain_log2: 4
+    keep_pipeline_alive: false
+    pipeline:
+      - adf_i2s_in
+      - self
+
+###################
+# VOICE ASSISTANT #
+###################
+
+micro_wake_word:
+  vad:
+  on_wake_word_detected:
+    # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing (Just restart micro wake word)
+    - if:
+        condition:
+          switch.is_off: master_mute_switch
+        then:
+          - voice_assistant.start:
+              wake_word: !lambda return wake_word;
+        else:
+          - micro_wake_word.start:
+  models:
+    - model: hey_jarvis
+
+voice_assistant:
+  microphone: adf_microphone
+  media_player: adf_media_player
+
+  use_wake_word: false
+
+  noise_suppression_level: 4
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+
+  on_client_connected:
+    - lambda: id(init_in_progress) = false;
+    - micro_wake_word.start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+  on_client_disconnected:
+    - micro_wake_word.stop:
+    - voice_assistant.stop:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+    - script.execute: control_leds
+  on_error:
+    - if:
+        condition:
+          lambda: return !id(init_in_progress);
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+          - script.execute: control_leds
+          - delay: 1s
+          - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          - script.execute: control_leds
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+    - script.execute: control_leds
+  on_stt_vad_end:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: control_leds
+  on_tts_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+    - script.execute: control_leds
+  # When the voice assistant ends: Stop ducking audio.
+  on_end:
+    - wait_until:
+        not:
+          voice_assistant.is_running:
+    - micro_wake_word.start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+
+############
+# LED RING #
+############
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: led_ring
+    rgb_order: GRB
+    pin: GPIO4
+    num_leds: 12
+    rmt_channel: 0
+    chipset: ws2812
+    name: "LED"
+    disabled_by_default: false
+    icon: "mdi:led-on"
+    default_transition_length: 0s
+    effects:
+      - addressable_lambda:
+          name: "Waiting for Command"
+          update_interval: 100ms
+          lambda: |-
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            for (int i = 0; i < 12; i++) {
+              if (i == id(global_led_animation_index) % 12) {
+                it[i] = color;
+              } else if (i == (id(global_led_animation_index) + 11) % 12) {
+                it[i] = color * 192;
+              } else if (i == (id(global_led_animation_index) + 10) % 12) {
+                it[i] = color * 128;
+              } else if (i == (id(global_led_animation_index) + 6) % 12) {
+                it[i] = color;
+              } else if (i == (id(global_led_animation_index) + 5) % 12) {
+                it[i] = color * 192;
+              } else if (i == (id(global_led_animation_index) + 4) % 12) {
+                it[i] = color * 128;
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+            id(global_led_animation_index) = (id(global_led_animation_index) + 1) % 12;
+      - addressable_lambda:
+          name: "Listening For Command"
+          update_interval: 50ms
+          lambda: |-
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            for (int i = 0; i < 12; i++) {
+              if (i == id(global_led_animation_index) % 12) {
+                it[i] = color;
+              } else if (i == (id(global_led_animation_index) + 11) % 12) {
+                it[i] = color * 192;
+              } else if (i == (id(global_led_animation_index) + 10) % 12) {
+                it[i] = color * 128;
+              } else if (i == (id(global_led_animation_index) + 6) % 12) {
+                it[i] = color;
+              } else if (i == (id(global_led_animation_index) + 5) % 12) {
+                it[i] = color * 192;
+              } else if (i == (id(global_led_animation_index) + 4) % 12) {
+                it[i] = color * 128;
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+            id(global_led_animation_index) = (id(global_led_animation_index) + 1) % 12;
+      - addressable_lambda:
+          name: "Thinking"
+          update_interval: 10ms
+          lambda: |-
+            static uint8_t brightness_step = 0;
+            static bool brightness_decreasing = true;
+            static uint8_t brightness_step_number = 10;
+            if (initial_run) {
+              brightness_step = 0;
+              brightness_decreasing = true;
+            }
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            for (int i = 0; i < 12; i++) {
+              if (i == id(global_led_animation_index) % 12) {
+                it[i] = color * uint8_t(255/brightness_step_number*(brightness_step_number-brightness_step));
+              } else if (i == (id(global_led_animation_index) + 6) % 12) {
+                it[i] = color * uint8_t(255/brightness_step_number*(brightness_step_number-brightness_step));
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+            if (brightness_decreasing) {
+              brightness_step++;
+            } else {
+              brightness_step--;
+            }
+            if (brightness_step == 0 || brightness_step == brightness_step_number) {
+              brightness_decreasing = !brightness_decreasing;
+            }
+      - addressable_lambda:
+          name: "Replying"
+          update_interval: 50ms
+          lambda: |-
+            id(global_led_animation_index) = (12 + id(global_led_animation_index) - 1) % 12;
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            for (int i = 0; i < 12; i++) {
+              if (i == (id(global_led_animation_index)) % 12) {
+                it[i] = color;
+              } else if (i == ( id(global_led_animation_index) + 1) % 12) {
+                it[i] = color * 192;
+              } else if (i == ( id(global_led_animation_index) + 2) % 12) {
+                it[i] = color * 128;
+              } else if (i == ( id(global_led_animation_index) + 6) % 12) {
+                it[i] = color;
+              } else if (i == ( id(global_led_animation_index) + 7) % 12) {
+                it[i] = color * 192;
+              } else if (i == ( id(global_led_animation_index) + 8) % 12) {
+                it[i] = color * 128;
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+      - addressable_lambda:
+          name: "Volume Display"
+          update_interval: 50ms
+          lambda: |-
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            auto nb_leds_on = 12.0f * id(adf_media_player).volume;
+            for (int i = 0; i < 12; i++) {
+              if (i < nb_leds_on) {
+                it[i] = color;
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+      - addressable_lambda:
+          name: "Muted"
+          update_interval: 16ms
+          lambda: |-
+            static int8_t index = 0;
+            Color color(255, 0, 0);
+            for (int i = 0; i < 12; i++) {
+              if (i == 1 || i == 3 || i == 7 || i == 9) {
+                it[i] = color;
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+      - addressable_twinkle:
+          name: "Twinkle"
+          twinkle_probability: 50%
+      - pulse:
+          name: "Fast Pulse"
+          transition_length: 100ms
+          update_interval: 100ms
+          min_brightness: 50%
+          max_brightness: 100%
+      - addressable_rainbow:
+          name: "Rainbow"
+          width: 12
+      - addressable_lambda:
+          name: "Tick"
+          update_interval: 333ms
+          lambda: |-
+            static uint8_t index = 0;
+            Color color(255, 0, 0);
+            if (initial_run) {
+              index = 0;
+            }
+            for (int i = 0; i < 12; i++) {
+              if (i <= index ) {
+                it[i] = Color::BLACK;
+              } else {
+                it[i] = color;
+              }
+            }
+            index = (index + 1) % 12;
+
+####################
+# PHYSICAL BUTTONS #
+####################
+
+binary_sensor:
+  # MUTE
+  - platform: gpio
+    id: hardware_mute_switch
+    internal: true
+    pin:
+      number: GPIO3
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - switch.toggle: master_mute_switch
+  # LED
+  - platform: gpio
+    id: hardware_led_switch
+    internal: true
+    pin:
+      number: GPIO13
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - switch.toggle: led_feedback_switch
+  # TRIGGER
+  - platform: gpio
+    id: hardware_trigger_switch
+    internal: true
+    pin:
+      number: GPIO17
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      if:
+        condition:
+          and:
+            - switch.is_off: master_mute_switch
+            - not: voice_assistant.is_running
+        then:
+          - micro_wake_word.stop:
+          - delay: 500ms
+          - voice_assistant.start:
+
+  # VOLUME DOWN
+  - platform: gpio
+    id: hardware_vol_down_switch
+    internal: true
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - lambda: id(volume_touched) = true;
+      - script.execute:
+          id: control_volume
+          increase_volume: false
+  # VOLUME UP
+  - platform: gpio
+    id: hardware_vol_up_switch
+    internal: true
+    pin:
+      number: GPIO16
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - lambda: id(volume_touched) = true;
+      - script.execute:
+          id: control_volume
+          increase_volume: true
+
+switch:
+  # MUTE
+  - platform: template
+    id: master_mute_switch
+    icon: "mdi:microphone-off"
+    name: Mute
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - switch.template.publish:
+          id: master_mute_switch
+          state: ON
+    turn_off_action:
+      - switch.template.publish:
+          id: master_mute_switch
+          state: OFF
+    on_turn_on:
+      then:
+        - script.execute: control_leds
+    on_turn_off:
+      then:
+        - script.execute: control_leds
+  # LED
+  - platform: template
+    id: led_feedback_switch
+    icon: "mdi:alarm-light-off"
+    name: LED Feedback
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - switch.template.publish:
+          id: led_feedback_switch
+          state: ON
+    turn_off_action:
+      - switch.template.publish:
+          id: led_feedback_switch
+          state: OFF
+###########
+# SCRIPTS #
+###########
+script:
+  # Master script controlling the LEDs, based on different conditions : initialization in progress, wifi and api connected and voice assistant phase.
+  # For the sake of simplicity and re-usability, the script calls child scripts defined below.
+  # This script will be called every time one of these conditions is changing.
+  - id: control_leds
+    then:
+      - if:
+          condition:
+            lambda: return !id(init_in_progress);
+          then:
+            - if:
+                condition:
+                  wifi.connected:
+                then:
+                  - if:
+                      condition:
+                        api.connected:
+                      then:
+                        - if:
+                            condition:
+                              switch.is_on: led_feedback_switch
+                            then:
+                              - if:
+                                  condition:
+                                    lambda: return !id(volume_touched);
+                                  then:
+                                    - if:
+                                        condition:
+                                          switch.is_off: master_mute_switch
+                                        then:
+                                          - lambda: |
+                                              switch(id(voice_assistant_phase)) {
+                                                case ${voice_assist_waiting_for_command_phase_id}:
+                                                  id(control_leds_voice_assistant_waiting_for_command_phase).execute();
+                                                  break;
+                                                case ${voice_assist_listening_for_command_phase_id}:
+                                                  id(control_leds_voice_assistant_listening_for_command_phase).execute();
+                                                  break;
+                                                case ${voice_assist_thinking_phase_id}:
+                                                  id(control_leds_voice_assistant_thinking_phase).execute();
+                                                  break;
+                                                case ${voice_assist_replying_phase_id}:
+                                                  id(control_leds_voice_assistant_replying_phase).execute();
+                                                  break;
+                                                case ${voice_assist_error_phase_id}:
+                                                  id(control_leds_voice_assistant_error_phase).execute();
+                                                  break;
+                                                case ${voice_assist_not_ready_phase_id}:
+                                                  id(control_leds_voice_assistant_not_ready_phase).execute();
+                                                  break;
+                                                default:
+                                                  id(control_leds_voice_assistant_idle_phase).execute();
+                                                  break;
+                                              }
+                                        else:
+                                          - script.execute: control_leds_muted
+                                  else:
+                                    - script.execute: control_leds_volume_touched
+                            else:
+                              - script.execute: control_leds_voice_assistant_idle_phase
+                      else:
+                        - script.execute: control_leds_no_ha_connection_state
+                else:
+                  - script.execute: control_leds_no_ha_connection_state
+          else:
+            - script.execute: control_leds_init_state
+
+  - id: control_volume
+    mode: restart
+    parameters:
+      increase_volume: bool # True: Increase volume / False: Decrease volume.
+    then:
+      - delay: 16ms
+      - if:
+          condition:
+            lambda: return increase_volume;
+          then:
+            - lambda: |-
+                int new_volume = id(volume) + 1;
+                if (new_volume <= 12) id(volume) = new_volume;
+          else:
+            - lambda: |-
+                int new_volume = id(volume) - 1;
+                if (new_volume >= 0) id(volume) = new_volume;
+      - media_player.volume_set:
+          id: adf_media_player
+          volume: !lambda return id(volume) / 12.0;
+      - script.execute: control_leds
+      - delay: 2s
+      - lambda: id(volume_touched) = false;
+      - script.execute: control_leds
+
+    # Script executed during initialization
+  # Blue Twinkle if Wifi is not connected
+  # Green Twinkle if Wifi is connected
+  - id: control_leds_init_state
+    then:
+      - if:
+          condition:
+            not: wifi.connected
+          then:
+            - light.turn_on:
+                brightness: 100%
+                red: 0
+                green: 0
+                blue: 1.0
+                id: led_ring
+                effect: "Twinkle"
+          else:
+            - light.turn_on:
+                brightness: 100%
+                red: 0
+                green: 1.0
+                blue: 0
+                id: led_ring
+                effect: "Twinkle"
+
+  # Script executed when the device has no connection to Home Assistant
+  # Red Twinkle (This will be visible during HA updates for example)
+  - id: control_leds_no_ha_connection_state
+    then:
+      - light.turn_on:
+          brightness: 100%
+          red: 1
+          green: 0
+          blue: 0
+          id: led_ring
+          effect: "Twinkle"
+
+  # Script executed when the voice assistant is idle (waiting for a wake word)
+  # Nothing (Either LED ring off or LED ring on if the user decided to turn the user facing LED ring on)
+  - id: control_leds_voice_assistant_idle_phase
+    then:
+      - light.turn_off: led_ring
+
+  # Script executed when the voice assistant is waiting for a command (After the wake word)
+  # Slow clockwise spin of the LED ring.
+  - id: control_leds_voice_assistant_waiting_for_command_phase
+    then:
+      - light.turn_on:
+          brightness: 100%
+          id: led_ring
+          effect: "Waiting for Command"
+
+  # Script executed when the voice assistant is listening to a command
+  # Fast clockwise spin of the LED ring.
+  - id: control_leds_voice_assistant_listening_for_command_phase
+    then:
+      - light.turn_on:
+          brightness: 100%
+          id: led_ring
+          effect: "Listening For Command"
+
+  # Script executed when the voice assistant is thinking to a command
+  # The spin stops and the 2 LEDs that are currently on and blinking indicating the commend is being processed.
+  - id: control_leds_voice_assistant_thinking_phase
+    then:
+      - light.turn_on:
+          brightness: 100%
+          id: led_ring
+          effect: "Thinking"
+
+  # Script executed when the voice assistant is thinking to a command
+  # Fast anticlockwise spin of the LED ring.
+  - id: control_leds_voice_assistant_replying_phase
+    then:
+      - light.turn_on:
+          brightness: 100%
+          id: led_ring
+          effect: "Replying"
+
+  # Script executed when the voice assistant is in error
+  # Fast Red Pulse
+  # Note: Today on_end happens too fast after an error. This is barely visible.
+  - id: control_leds_voice_assistant_error_phase
+    then:
+      - light.turn_on:
+          brightness: 100%
+          red: 1
+          green: 0
+          blue: 0
+          id: led_ring
+          effect: "Fast Pulse"
+
+  # Script executed when the volume buttons are touched
+  # A number of LEDs turn on indicating a visual representation of the volume of the media player entity.
+  - id: control_leds_volume_touched
+    then:
+      - light.turn_on:
+          brightness: 100%
+          id: led_ring
+          effect: "Volume Display"
+
+  - id: control_leds_muted
+    then:
+      - light.turn_on:
+          brightness: 40%
+          id: led_ring
+          effect: "Muted"
+
+  - id: control_leds_voice_assistant_not_ready_phase
+    then:
+      - light.turn_on:
+          brightness: 100%
+          red: 1
+          green: 0
+          blue: 0
+          id: led_ring
+          effect: "Twinkle"
