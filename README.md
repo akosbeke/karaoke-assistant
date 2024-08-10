@@ -91,7 +91,7 @@ Now you can put everything together. There are three additional connections you 
 
 ## Software
 
-The software part was trickier than I expected. It is based on ESPHome and Home Assistant and I also based it on the new [voic-kit](https://github.com/esphome/voice-kit) project from Nabu Casa that's supposed to make it easier to create voice assistant projects with ESPHome with a prebuilt ESP32 board with an XMOS chip. I'm not sure when it will be released or what the availability and cost will be so I think this project is still relevant.
+The software part was trickier than I expected. It is based on ESPHome and Home Assistant and I also based it on the new [voice-kit](https://github.com/esphome/voice-kit) project from Nabu Casa that's supposed to make it easier to create voice assistant projects with ESPHome with a prebuilt ESP32 board and an XMOS chip. I'm not sure when it will be released or what the availability and cost will be so I think this project is still relevant.
 
 You can find the firmware in the `karaoke-assistant.yaml` file that you need to compile with ESPHome and upload to the ESP32-S3 module. I'm not going to go into details on how to do that as there are plenty of tutorials on the internet.
 
